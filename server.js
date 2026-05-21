@@ -13,7 +13,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const dbPath = path.join(__dirname, 'db.json');
+const dbPath = process.env.VERCEL ? path.join('/tmp', 'db.json') : path.join(__dirname, 'db.json');
 
 // Real DB starting from ZERO
 if (!fs.existsSync(dbPath)) {
