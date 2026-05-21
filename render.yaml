@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: admin-backend
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render dynamically assigns a PORT, Express will use process.env.PORT automatically
+
+
