@@ -31,6 +31,7 @@ if (!fs.existsSync(dbPath)) {
             joinChannelEnabled: false,
             joinChannelLink: "https://t.me/yourchannel",
             batchImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
+            splashImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
             alwaysUpdate: false
         },
         dailyStats: [], // format: { date: '21 May', activeUsers: 1 }
@@ -68,6 +69,10 @@ if (!fs.existsSync(dbPath)) {
             }
             if (currentData.config.batchImageUrl === undefined || currentData.config.batchImageUrl.includes("picsum.photos")) {
                 currentData.config.batchImageUrl = "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png";
+                modified = true;
+            }
+            if (currentData.config.splashImageUrl === undefined) {
+                currentData.config.splashImageUrl = "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png";
                 modified = true;
             }
         }
@@ -160,6 +165,18 @@ wss.on('connection', (ws, req) => {
 
                     // Notify admins of new user lists
                     broadcast('update_users', { users: db.users }, true);
+                } else if (data.action === 'track_activity' && data.payload) {
+                    const { userId, activity } = data.payload;
+                    if (userId && activity) {
+                        const db = getDb();
+                        if (db.users && db.users[userId]) {
+                            db.users[userId].currentActivity = activity;
+                            db.users[userId].lastActive = Date.now();
+                            db.users[userId].isOnline = true;
+                            saveDb(db);
+                            broadcast('update_users', { users: db.users }, true);
+                        }
+                    }
                 } else if (data.action === 'heartbeat' && data.payload) {
                     const { userId } = data.payload;
                     if (userId) {
@@ -252,6 +269,16 @@ app.post('/api/stats/click', (req, res) => {
     saveDb(db);
     broadcast('update_stats', { stats: db.stats, dailyStats: db.dailyStats, connectedNow: connectedAppCounter }, true);
     res.json({ success: true });
+});
+
+// Robust HTTP REST endpoint fallback for notification broadcast
+app.post('/api/send_notification', (req, res) => {
+    const { title, body, link } = req.body;
+    if (!title || !body) {
+        return res.status(400).json({ error: "Title and body are required" });
+    }
+    broadcast('notification', { title, body, link }, false);
+    res.json({ success: true, message: "Broadcasted via API" });
 });
 
 const PORT = process.env.PORT || 3000;
