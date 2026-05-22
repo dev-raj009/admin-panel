@@ -20,15 +20,67 @@ if (!fs.existsSync(dbPath)) {
     fs.writeFileSync(dbPath, JSON.stringify({
         stats: { totalUsers: 0, totalDownloads: 0, totalActiveUsers: 0, todayActiveUsers: 0, notificationClicks: 0 },
         config: { 
-            batchesApi: "https://example.com/api/v1/batches", 
-            subjectsApi: "https://example.com/api/v1/subjects", 
-            videosApi: "https://example.com/api/v1/videos", 
-            pdfsApi: "https://example.com/api/v1/pdfs",
+            batchesApi: "https://cw-ut-apis-e37c22944d2f.herokuapp.com/api/batches", 
+            subjectsApi: "https://cw-api-website.vercel.app/batch/{batchId}", 
+            videosApi: "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true", 
+            pdfsApi: "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true",
+            resolverApi: "https://cw-vid-virid.vercel.app/get_video_details?name={videoId}",
             isUpdateRequired: false,
-            updateLink: "https://play.google.com/store"
+            updateLink: "https://play.google.com/store",
+            maintenanceMode: false,
+            joinChannelEnabled: false,
+            joinChannelLink: "https://t.me/yourchannel",
+            batchImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
+            alwaysUpdate: false
         },
-        dailyStats: [] // format: { date: '21 May', activeUsers: 1 }
+        dailyStats: [], // format: { date: '21 May', activeUsers: 1 }
+        users: {} // format: { userId: { name, avatar, firstActive, lastActive, totalActiveSeconds, isOnline } }
     }));
+} else {
+    // Migrate to support resolverApi, alwaysUpdate and users structure safely
+    try {
+        const currentData = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+        let modified = false;
+        if (currentData.config) {
+            if (currentData.config.alwaysUpdate === undefined) {
+                currentData.config.alwaysUpdate = false;
+                modified = true;
+            }
+            if (currentData.config.resolverApi === undefined || currentData.config.resolverApi.includes("example.com")) {
+                currentData.config.resolverApi = "https://cw-vid-virid.vercel.app/get_video_details?name={videoId}";
+                modified = true;
+            }
+            if (currentData.config.batchesApi === undefined || currentData.config.batchesApi.includes("example.com")) {
+                currentData.config.batchesApi = "https://cw-ut-apis-e37c22944d2f.herokuapp.com/api/batches";
+                modified = true;
+            }
+            if (currentData.config.subjectsApi === undefined || currentData.config.subjectsApi.includes("example.com")) {
+                currentData.config.subjectsApi = "https://cw-api-website.vercel.app/batch/{batchId}";
+                modified = true;
+            }
+            if (currentData.config.videosApi === undefined || currentData.config.videosApi.includes("example.com")) {
+                currentData.config.videosApi = "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true";
+                modified = true;
+            }
+            if (currentData.config.pdfsApi === undefined || currentData.config.pdfsApi.includes("example.com")) {
+                currentData.config.pdfsApi = "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true";
+                modified = true;
+            }
+            if (currentData.config.batchImageUrl === undefined || currentData.config.batchImageUrl.includes("picsum.photos")) {
+                currentData.config.batchImageUrl = "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png";
+                modified = true;
+            }
+        }
+        if (!currentData.users) {
+            currentData.users = {};
+            modified = true;
+        }
+        if (modified) {
+            fs.writeFileSync(dbPath, JSON.stringify(currentData, null, 2));
+        }
+    } catch (e) {
+        console.error("Migration error", e);
+    }
 }
 
 const getDb = () => JSON.parse(fs.readFileSync(dbPath, 'utf8'));
@@ -82,8 +134,76 @@ wss.on('connection', (ws, req) => {
         // Send latest config to this newly connected app
         ws.send(JSON.stringify({ action: 'update_config', payload: db.config }));
         
+        ws.on('message', (message) => {
+            try {
+                const data = JSON.parse(message);
+                if (data.action === 'identify' && data.payload) {
+                    const { userId, name, avatar } = data.payload;
+                    ws.userId = userId;
+                    ws.connectedAt = Date.now();
+
+                    const db = getDb();
+                    if (!db.users) db.users = {};
+
+                    const firstActive = db.users[userId] ? db.users[userId].firstActive : Date.now();
+                    const accumulated = db.users[userId] ? db.users[userId].totalActiveSeconds || 0 : 0;
+
+                    db.users[userId] = {
+                        name: name || "Anonymous",
+                        avatar: avatar || "Neon Astronaut",
+                        firstActive: firstActive,
+                        lastActive: Date.now(),
+                        totalActiveSeconds: accumulated,
+                        isOnline: true
+                    };
+                    saveDb(db);
+
+                    // Notify admins of new user lists
+                    broadcast('update_users', { users: db.users }, true);
+                } else if (data.action === 'heartbeat' && data.payload) {
+                    const { userId } = data.payload;
+                    if (userId) {
+                        const db = getDb();
+                        if (db.users && db.users[userId]) {
+                            db.users[userId].lastActive = Date.now();
+                            db.users[userId].isOnline = true;
+                            // Add periodic session increments if they stay active
+                            if (ws.connectedAt) {
+                                const currentNow = Date.now();
+                                const diff = Math.round((currentNow - ws.connectedAt) / 1000);
+                                if (diff > 0) {
+                                    db.users[userId].totalActiveSeconds = (db.users[userId].totalActiveSeconds || 0) + diff;
+                                    ws.connectedAt = currentNow; // Reset segment
+                                }
+                            }
+                            saveDb(db);
+                            broadcast('update_users', { users: db.users }, true);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error("App socket parse error", e);
+            }
+        });
+
         ws.on('close', () => {
             connectedAppCounter = Math.max(0, connectedAppCounter - 1);
+            
+            const db = getDb();
+            if (ws.userId && db.users && db.users[ws.userId]) {
+                db.users[ws.userId].isOnline = false;
+                db.users[ws.userId].lastActive = Date.now();
+                if (ws.connectedAt) {
+                    const elapsed = Math.round((Date.now() - ws.connectedAt) / 1000);
+                    if (elapsed > 0) {
+                        db.users[ws.userId].totalActiveSeconds = (db.users[ws.userId].totalActiveSeconds || 0) + elapsed;
+                    }
+                }
+                saveDb(db);
+                // Broadcast updated user registry
+                broadcast('update_users', { users: db.users }, true);
+            }
+            
             broadcast('update_stats', { stats: db.stats, dailyStats: db.dailyStats, connectedNow: connectedAppCounter }, true);
         });
     } else {
