@@ -303,6 +303,10 @@
                         <label class="block text-[10px] font-bold text-textSecondary uppercase tracking-wider mb-2"><i class="fa-solid fa-image text-white mr-1"></i> Universal Batch Banner URL</label>
                         <input type="url" id="batchImageUrl" placeholder="https://..." class="w-full glass-input rounded-xl px-4 py-3 text-gray-300 font-mono text-xs outline-none">
                     </div>
+                    <div class="mt-6 pt-6 border-t border-darkBorder">
+                        <label class="block text-[10px] font-bold text-textSecondary uppercase tracking-wider mb-2"><i class="fa-solid fa-rocket text-neonCyan mr-1"></i> Splash Screen Logo URL</label>
+                        <input type="url" id="splashImageUrl" placeholder="https://..." class="w-full glass-input rounded-xl px-4 py-3 text-gray-300 font-mono text-xs outline-none">
+                    </div>
                 </div>
             </div>
         </div>
@@ -337,12 +341,13 @@
                             <th class="py-3 px-4">Onboard Date</th>
                             <th class="py-3 px-4">Last Active</th>
                             <th class="py-3 px-4 text-center">Active duration</th>
+                            <th class="py-3 px-4">Current Action / Lecture</th>
                             <th class="py-3 px-4 text-right">Online Status</th>
                         </tr>
                     </thead>
                     <tbody id="userTableBody" class="divide-y divide-darkBorder/40">
                         <tr>
-                            <td colspan="8" class="text-center py-8 text-textSecondary text-xs">
+                            <td colspan="9" class="text-center py-8 text-textSecondary text-xs">
                                 <i class="fa-solid fa-spinner animate-spin text-neonCyan mr-2"></i> Loading users telemetry database...
                             </td>
                         </tr>
@@ -472,6 +477,12 @@
                         <td class="py-3.5 px-4 text-center">
                             <span class="bg-neonBlue/10 text-neonBlue border border-neonBlue/20 text-[10px] font-black tracking-wider px-2 py-0.5 rounded-full"><i class="fa-solid fa-stopwatch mr-1"></i>${activeTimeStr}</span>
                         </td>
+                        <td class="py-3.5 px-4 text-[10px] font-bold text-neonCyan max-w-[150px] truncate" title="${user.currentActivity || 'Wandering App'}">
+                            ${user.isOnline ? 
+                                `<span><i class="fa-solid fa-signal mr-1 opacity-60"></i>${user.currentActivity || 'Wandering App'}</span>` : 
+                                `<span class="text-textSecondary/40 italic">Asleep</span>`
+                            }
+                        </td>
                         <td class="py-3.5 px-4 text-right">
                             ${isOnline ? 
                                 `<span class="inline-flex items-center gap-1 text-[9px] font-black tracking-widest text-green-400 bg-green-500/10 border border-green-500/20 px-2 py-0.5 rounded-full"><span class="w-1.5 h-1.5 rounded-full connected-dot animate-pulse"></span> ONLINE</span>` :
@@ -483,7 +494,7 @@
             });
             
             if (displayed === 0) {
-                tbody.innerHTML = `<tr><td colspan="8" class="text-center py-8 text-textSecondary text-xs">No matching users found for "${searchVal}".</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="9" class="text-center py-8 text-textSecondary text-xs">No matching users found for "${searchVal}".</td></tr>`;
             }
         }
         
@@ -522,6 +533,7 @@
             document.getElementById('pdfsApi').value = config.pdfsApi || '';
             document.getElementById('resolverApi').value = config.resolverApi || '';
             document.getElementById('batchImageUrl').value = config.batchImageUrl || '';
+            document.getElementById('splashImageUrl').value = config.splashImageUrl || '';
             document.getElementById('joinChannelLink').value = config.joinChannelLink || '';
             document.getElementById('updateLink').value = config.updateLink || '';
 
@@ -541,6 +553,7 @@
                 pdfsApi: document.getElementById('pdfsApi').value,
                 resolverApi: document.getElementById('resolverApi').value,
                 batchImageUrl: document.getElementById('batchImageUrl').value,
+                splashImageUrl: document.getElementById('splashImageUrl').value,
                 joinChannelLink: document.getElementById('joinChannelLink').value,
                 updateLink: document.getElementById('updateLink').value,
                 isUpdateRequired: document.getElementById('isUpdateRequired').checked,
@@ -557,21 +570,51 @@
             alert("COMMAND INJECTED: Live configurations updated globally.");
         }
 
-        function sendNotification() {
-            if(!ws || ws.readyState !== WebSocket.OPEN) return alert("System Offline!");
-
+        async function sendNotification() {
             const title = document.getElementById('notiTitle').value;
             const body = document.getElementById('notiBody').value;
             const link = document.getElementById('notiLink').value;
 
             if(!title || !body) return alert("Notification requires title and body.");
+
+            let wsSent = false;
+            if(ws && ws.readyState === WebSocket.OPEN) {
+                try {
+                    ws.send(JSON.stringify({
+                        action: 'send_notification',
+                        payload: { title, body, link }
+                    }));
+                    wsSent = true;
+                } catch(e) {
+                    console.error("WS notification failed, trying HTTP", e);
+                }
+            }
+
+            // Also post to express REST endpoint as fallback/additional guarantee
+            try {
+                const response = await fetch('/api/send_notification', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title, body, link })
+                });
+                const resData = await response.json();
+                if(response.ok) {
+                    alert("BROADCAST SENT SUCCESSFULLY: All active devices alerted perfectly! " + (wsSent ? "[Websocket + API]" : "[API ON-FALLBACK]"));
+                } else {
+                    if (wsSent) {
+                        alert("BROADCAST SENT: Alerted via Websocket [REST API fallback failed].");
+                    } else {
+                        alert("Error: " + (resData.error || "Failed to broadcast"));
+                    }
+                }
+            } catch(e) {
+                if (wsSent) {
+                    alert("BROADCAST SENT: Alerted via Websocket [REST API offline].");
+                } else {
+                    alert("Failed to send notification: Server unreachable or offline.");
+                }
+            }
             
-            ws.send(JSON.stringify({
-                action: 'send_notification',
-                payload: { title, body, link }
-            }));
-            
-            alert("BROADCAST SENT: All connected clients pinged.");
             document.getElementById('notiTitle').value = '';
             document.getElementById('notiBody').value = '';
             document.getElementById('notiLink').value = '';
