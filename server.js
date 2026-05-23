@@ -132,8 +132,8 @@ wss.on('connection', (ws, req) => {
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
     if (isApp) {
-        const db = getDb();
-        if (db.bannedIps && db.bannedIps.includes(ip)) {
+        const banCheckDb = getDb();
+        if (banCheckDb.bannedIps && banCheckDb.bannedIps.includes(ip)) {
             ws.send(JSON.stringify({ action: 'update_config', payload: { maintenanceMode: true, splashImageUrl: "BANNED" } }));
             return ws.terminate();
         }
