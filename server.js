@@ -38,7 +38,8 @@ if (!fs.existsSync(dbPath)) {
         users: {}, // format: { userId: { name, avatar, firstActive, lastActive, totalActiveSeconds, isOnline, ip, activities: [] } }
         bannedIps: [],
         notifications: [],
-        freeAccessUsers: [] // format: [userId1, userId2...]
+        freeAccessUsers: [], // format: [userId1, userId2...]
+        chatHistory: [] // format: { id, senderId, senderName, text, imageUrl, timestamp, isAdmin }
     }));
 } else {
     // Migrate to support new fields
@@ -48,6 +49,11 @@ if (!fs.existsSync(dbPath)) {
         if (!currentData.bannedIps) { currentData.bannedIps = []; modified = true; }
         if (!currentData.notifications) { currentData.notifications = []; modified = true; }
         if (!currentData.freeAccessUsers) { currentData.freeAccessUsers = []; modified = true; }
+        if (!currentData.chatHistory) { currentData.chatHistory = []; modified = true; }
+        if (currentData.config && currentData.config.chatEnabled === undefined) {
+             currentData.config.chatEnabled = true;
+             modified = true;
+        }
         if (currentData.stats && currentData.stats.keysGeneratedToday === undefined) {
             currentData.stats.keysGeneratedToday = 0;
             currentData.stats.keyGenSuccess = 0;
@@ -159,7 +165,11 @@ wss.on('connection', (ws, req) => {
         // Send latest config to this newly connected app
         ws.send(JSON.stringify({ 
             action: 'update_config', 
-            payload: { ...db.config, freeAccessUsers: db.freeAccessUsers || [] } 
+            payload: { 
+                ...db.config, 
+                freeAccessUsers: db.freeAccessUsers || [],
+                chatHistory: (db.chatHistory || []).slice(-50)
+            } 
         }));
         
         ws.on('message', (message) => {
@@ -261,6 +271,28 @@ wss.on('connection', (ws, req) => {
                             broadcast('update_users', { users: db.users }, true);
                         }
                     }
+                } else if (data.action === 'send_chat_message' && data.payload) {
+                    const db = getDb();
+                    // Block if chat is globally off unless admin
+                    if (!db.config.chatEnabled && !ws.isAdmin) return;
+
+                    const msg = {
+                        id: Date.now() + "-" + Math.random().toString(36).substr(2, 5),
+                        senderId: data.payload.senderId || "Unknown",
+                        senderName: data.payload.senderName || "Anonymous",
+                        text: data.payload.text || "",
+                        imageUrl: data.payload.imageUrl || null,
+                        timestamp: Date.now(),
+                        isAdmin: ws.isAdmin || false
+                    };
+                    
+                    db.chatHistory = db.chatHistory || [];
+                    db.chatHistory.push(msg);
+                    if (db.chatHistory.length > 200) db.chatHistory.shift();
+                    saveDb(db);
+                    
+                    // Broadcast to everyone
+                    broadcast('new_chat_message', msg, false);
                 }
             } catch (e) {
                 console.error("App socket parse error", e);
@@ -293,7 +325,11 @@ wss.on('connection', (ws, req) => {
         const db = getDb();
         ws.send(JSON.stringify({ 
             action: 'init_admin', 
-            payload: { ...db, connectedNow: connectedAppCounter } 
+            payload: { 
+                ...db, 
+                connectedNow: connectedAppCounter,
+                chatHistory: (db.chatHistory || []).slice(-100) 
+            } 
         }));
         
         ws.on('message', (message) => {
