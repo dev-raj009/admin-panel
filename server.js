@@ -18,7 +18,7 @@ const dbPath = process.env.VERCEL ? path.join('/tmp', 'db.json') : path.join(__d
 // Real DB starting from ZERO
 if (!fs.existsSync(dbPath)) {
     fs.writeFileSync(dbPath, JSON.stringify({
-        stats: { totalUsers: 0, totalDownloads: 0, totalActiveUsers: 0, todayActiveUsers: 0, notificationClicks: 0 },
+        stats: { totalUsers: 0, totalDownloads: 0, totalActiveUsers: 0, todayActiveUsers: 0, notificationClicks: 0, totalTimeSpentSec: 0 },
         config: { 
             batchesApi: "https://xxadmin-raj.codxraj.site/api/batches", 
             subjectsApi: "https://cw-api-website.vercel.app/batch/{batchId}", 
@@ -35,13 +35,19 @@ if (!fs.existsSync(dbPath)) {
             alwaysUpdate: false
         },
         dailyStats: [], // format: { date: '21 May', activeUsers: 1 }
-        users: {} // format: { userId: { name, avatar, firstActive, lastActive, totalActiveSeconds, isOnline } }
+        users: {}, // format: { userId: { name, avatar, firstActive, lastActive, totalActiveSeconds, isOnline, ip, deviceModel, androidVersion } }
+        bannedIps: [],
+        notificationsSent: [] // { id, title, sentAt, reachedCount, errorCount }
     }));
 } else {
     // Migrate to support resolverApi, alwaysUpdate and users structure safely
     try {
         const currentData = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
         let modified = false;
+        if (!currentData.bannedIps) { currentData.bannedIps = []; modified = true; }
+        if (!currentData.notificationsSent) { currentData.notificationsSent = []; modified = true; }
+        if (currentData.stats && currentData.stats.totalTimeSpentSec === undefined) { currentData.stats.totalTimeSpentSec = 0; modified = true; }
+        
         if (currentData.config) {
             if (currentData.config.alwaysUpdate === undefined) {
                 currentData.config.alwaysUpdate = false;
@@ -51,23 +57,23 @@ if (!fs.existsSync(dbPath)) {
                 currentData.config.resolverApi = "https://cw-vid-virid.vercel.app/get_video_details?name={videoId}";
                 modified = true;
             }
-            if (currentData.config.batchesApi === undefined || currentData.config.batchesApi.includes("example.com") || currentData.config.batchesApi.includes("herokuapp.com")) {
+            if (currentData.config.batchesApi === undefined || (currentData.config.batchesApi && (currentData.config.batchesApi.includes("example.com") || currentData.config.batchesApi.includes("herokuapp.com")))) {
                 currentData.config.batchesApi = "https://xxadmin-raj.codxraj.site/api/batches";
                 modified = true;
             }
-            if (currentData.config.subjectsApi === undefined || currentData.config.subjectsApi.includes("example.com")) {
+            if (currentData.config.subjectsApi === undefined || (currentData.config.subjectsApi && currentData.config.subjectsApi.includes("example.com"))) {
                 currentData.config.subjectsApi = "https://cw-api-website.vercel.app/batch/{batchId}";
                 modified = true;
             }
-            if (currentData.config.videosApi === undefined || currentData.config.videosApi.includes("example.com")) {
+            if (currentData.config.videosApi === undefined || (currentData.config.videosApi && currentData.config.videosApi.includes("example.com"))) {
                 currentData.config.videosApi = "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true";
                 modified = true;
             }
-            if (currentData.config.pdfsApi === undefined || currentData.config.pdfsApi.includes("example.com")) {
+            if (currentData.config.pdfsApi === undefined || (currentData.config.pdfsApi && currentData.config.pdfsApi.includes("example.com"))) {
                 currentData.config.pdfsApi = "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true";
                 modified = true;
             }
-            if (currentData.config.batchImageUrl === undefined || currentData.config.batchImageUrl.includes("picsum.photos")) {
+            if (currentData.config.batchImageUrl === undefined || (currentData.config.batchImageUrl && currentData.config.batchImageUrl.includes("picsum.photos"))) {
                 currentData.config.batchImageUrl = "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png";
                 modified = true;
             }
@@ -110,6 +116,15 @@ let connectedAppCounter = 0;
 
 wss.on('connection', (ws, req) => {
     const isApp = req.url.includes('?type=app');
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    ws.ip = ip;
+
+    const db = getDb();
+    if (isApp && db.bannedIps && db.bannedIps.includes(ip)) {
+        ws.send(JSON.stringify({ action: 'banned', payload: { reason: "Access Denied by Admin Group" } }));
+        ws.terminate();
+        return;
+    }
     
     if (isApp) {
         connectedAppCounter++;
@@ -143,7 +158,7 @@ wss.on('connection', (ws, req) => {
             try {
                 const data = JSON.parse(message);
                 if (data.action === 'identify' && data.payload) {
-                    const { userId, name, avatar } = data.payload;
+                    const { userId, name, avatar, deviceModel, androidVersion, brand } = data.payload;
                     ws.userId = userId;
                     ws.connectedAt = Date.now();
 
@@ -159,7 +174,11 @@ wss.on('connection', (ws, req) => {
                         firstActive: firstActive,
                         lastActive: Date.now(),
                         totalActiveSeconds: accumulated,
-                        isOnline: true
+                        isOnline: true,
+                        ip: ws.ip,
+                        deviceModel: deviceModel || "Generic Android",
+                        androidVersion: androidVersion || "Unknown",
+                        brand: brand || "Generic"
                     };
                     saveDb(db);
 
@@ -190,11 +209,24 @@ wss.on('connection', (ws, req) => {
                                 const diff = Math.round((currentNow - ws.connectedAt) / 1000);
                                 if (diff > 0) {
                                     db.users[userId].totalActiveSeconds = (db.users[userId].totalActiveSeconds || 0) + diff;
+                                    db.stats.totalTimeSpentSec = (db.stats.totalTimeSpentSec || 0) + diff;
                                     ws.connectedAt = currentNow; // Reset segment
                                 }
                             }
                             saveDb(db);
                             broadcast('update_users', { users: db.users }, true);
+                            broadcast('update_stats', { stats: db.stats, dailyStats: db.dailyStats, connectedNow: connectedAppCounter }, true);
+                        }
+                    }
+                } else if (data.action === 'notification_ack') {
+                    const { notifId } = data.payload;
+                    if (notifId) {
+                        const db = getDb();
+                        const notif = db.notificationsSent.find(n => n.id === notifId);
+                        if (notif) {
+                            notif.reachedCount = (notif.reachedCount || 0) + 1;
+                            saveDb(db);
+                            broadcast('update_notifications', { notificationsSent: db.notificationsSent }, true);
                         }
                     }
                 }
@@ -214,6 +246,7 @@ wss.on('connection', (ws, req) => {
                     const elapsed = Math.round((Date.now() - ws.connectedAt) / 1000);
                     if (elapsed > 0) {
                         db.users[ws.userId].totalActiveSeconds = (db.users[ws.userId].totalActiveSeconds || 0) + elapsed;
+                        db.stats.totalTimeSpentSec = (db.stats.totalTimeSpentSec || 0) + elapsed;
                     }
                 }
                 saveDb(db);
@@ -236,14 +269,51 @@ wss.on('connection', (ws, req) => {
             try {
                 const data = JSON.parse(message);
                 if (data.action === 'send_notification') {
-                    // BROADCAST NOTIFICATION TO ALL CONNECTED APPS
-                    broadcast('notification', data.payload, false);
+                    const db = getDb();
+                    const notifId = Date.now().toString();
+                    const newNotif = {
+                        id: notifId,
+                        title: data.payload.title,
+                        body: data.payload.body,
+                        sentAt: Date.now(),
+                        reachedCount: 0,
+                        errorCount: 0
+                    };
+                    db.notificationsSent.push(newNotif);
+                    if (db.notificationsSent.length > 50) db.notificationsSent.shift();
+                    saveDb(db);
+                    
+                    // BROADCAST NOTIFICATION TO ALL CONNECTED APPS with ID for tracking
+                    broadcast('notification', { ...data.payload, id: notifId }, false);
+                    broadcast('update_notifications', { notificationsSent: db.notificationsSent }, true);
                 } else if (data.action === 'update_config') {
                     const db = getDb();
                     db.config = data.payload;
                     saveDb(db);
                     // SEND CONFIG TO ALL APPS
                     broadcast('update_config', db.config, false);
+                } else if (data.action === 'ban_user') {
+                    const { userId, ip } = data.payload;
+                    const db = getDb();
+                    if (ip && !db.bannedIps.includes(ip)) {
+                        db.bannedIps.push(ip);
+                    }
+                    saveDb(db);
+                    
+                    // Disconnect all sessions with this IP
+                    wss.clients.forEach(client => {
+                        if (client.ip === ip && !client.isAdmin) {
+                            client.send(JSON.stringify({ action: 'banned', payload: { reason: "Restricted by Admin Group" } }));
+                            client.terminate();
+                        }
+                    });
+                    broadcast('update_admin_data', { bannedIps: db.bannedIps }, true);
+                } else if (data.action === 'unban_ip') {
+                    const { ip } = data.payload;
+                    const db = getDb();
+                    db.bannedIps = db.bannedIps.filter(b => b !== ip);
+                    saveDb(db);
+                    broadcast('update_admin_data', { bannedIps: db.bannedIps }, true);
                 }
             } catch(e) {
                 console.error("Parse Error Admin WS", e);
