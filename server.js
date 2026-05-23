@@ -20,7 +20,7 @@ if (!fs.existsSync(dbPath)) {
     fs.writeFileSync(dbPath, JSON.stringify({
         stats: { totalUsers: 0, totalDownloads: 0, totalActiveUsers: 0, todayActiveUsers: 0, notificationClicks: 0 },
         config: { 
-            batchesApi: "https://cw-ut-apis-e37c22944d2f.herokuapp.com/api/batches", 
+            batchesApi: "https://xxadmin-raj.codxraj.site/api/batches", 
             subjectsApi: "https://cw-api-website.vercel.app/batch/{batchId}", 
             videosApi: "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true", 
             pdfsApi: "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true",
@@ -51,8 +51,8 @@ if (!fs.existsSync(dbPath)) {
                 currentData.config.resolverApi = "https://cw-vid-virid.vercel.app/get_video_details?name={videoId}";
                 modified = true;
             }
-            if (currentData.config.batchesApi === undefined || currentData.config.batchesApi.includes("example.com")) {
-                currentData.config.batchesApi = "https://cw-ut-apis-e37c22944d2f.herokuapp.com/api/batches";
+            if (currentData.config.batchesApi === undefined || currentData.config.batchesApi.includes("example.com") || currentData.config.batchesApi.includes("herokuapp.com")) {
+                currentData.config.batchesApi = "https://xxadmin-raj.codxraj.site/api/batches";
                 modified = true;
             }
             if (currentData.config.subjectsApi === undefined || currentData.config.subjectsApi.includes("example.com")) {
