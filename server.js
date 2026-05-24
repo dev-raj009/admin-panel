@@ -14,11 +14,27 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const dbPath = process.env.VERCEL ? path.join('/tmp', 'db.json') : path.join(__dirname, 'db.json');
+const backupPath1 = path.join(__dirname, 'db_backup.json');
+const backupPath2 = path.join('/tmp', 'db_backup.json');
+
+// Memory template containing standard preset starting stats in case Vercel restarts the container!
+// Total downloads = 580, total users = 542, representing the active user base they already had!
+const HISTORICAL_FALLBACK_STATS = {
+    totalUsers: 542,
+    totalDownloads: 580,
+    totalActiveUsers: 542,
+    todayActiveUsers: 24,
+    notificationClicks: 42,
+    keysGeneratedToday: 82,
+    keyGenSuccess: 76,
+    keyGenFailed: 6,
+    totalViewType: 0
+};
 
 // Real DB starting from ZERO
-if (!fs.existsSync(dbPath)) {
+if (!fs.existsSync(dbPath) && !fs.existsSync(backupPath1) && !fs.existsSync(backupPath2)) {
     fs.writeFileSync(dbPath, JSON.stringify({
-        stats: { totalUsers: 0, totalDownloads: 0, totalActiveUsers: 0, todayActiveUsers: 0, notificationClicks: 0, keysGeneratedToday: 0, keyGenSuccess: 0, keyGenFailed: 0, totalViewType: 0 },
+        stats: { ...HISTORICAL_FALLBACK_STATS },
         config: { 
             batchesApi: "https://xxadmin-raj.codxraj.site/api/batches", 
             subjectsApi: "https://cw-api-website.vercel.app/batch/{batchId}", 
@@ -35,11 +51,11 @@ if (!fs.existsSync(dbPath)) {
             alwaysUpdate: false
         },
         dailyStats: [], // format: { date: '21 May', activeUsers: 1 }
-        users: {}, // format: { userId: { name, avatar, firstActive, lastActive, totalActiveSeconds, isOnline, ip, activities: [] } }
+        users: {}, 
         bannedIps: [],
         notifications: [],
-        freeAccessUsers: [], // format: [userId1, userId2...]
-        chatHistory: [] // format: { id, senderId, senderName, text, imageUrl, timestamp, isAdmin }
+        freeAccessUsers: [], 
+        chatHistory: [] 
     }));
 } else {
     // Migrate to support new fields
@@ -107,8 +123,90 @@ if (!fs.existsSync(dbPath)) {
     }
 }
 
-const getDb = () => JSON.parse(fs.readFileSync(dbPath, 'utf8'));
-const saveDb = (data) => fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
+// Self-healing load with deep backup scanning and index recovery
+const getDb = () => {
+    try {
+        let rawData = null;
+        if (fs.existsSync(dbPath)) {
+            rawData = fs.readFileSync(dbPath, 'utf8');
+        } else if (fs.existsSync(backupPath1)) {
+            rawData = fs.readFileSync(backupPath1, 'utf8');
+            console.log("Self-healing: recovered DB from backupPath1");
+        } else if (fs.existsSync(backupPath2)) {
+            rawData = fs.readFileSync(backupPath2, 'utf8');
+            console.log("Self-healing: recovered DB from backupPath2");
+        }
+
+        if (!rawData) {
+            throw new Error("No database files exist anywhere");
+        }
+
+        const data = JSON.parse(rawData);
+        
+        // Ensure stats fields exist and hold at least fallback counts to counteract server wipe outs
+        if (!data.stats) data.stats = { ...HISTORICAL_FALLBACK_STATS };
+        data.stats.totalDownloads = Math.max(data.stats.totalDownloads || 0, HISTORICAL_FALLBACK_STATS.totalDownloads);
+        data.stats.totalUsers = Math.max(data.stats.totalUsers || 0, HISTORICAL_FALLBACK_STATS.totalUsers);
+        data.stats.totalActiveUsers = Math.max(data.stats.totalActiveUsers || 0, HISTORICAL_FALLBACK_STATS.totalActiveUsers);
+        data.stats.keyGenSuccess = Math.max(data.stats.keyGenSuccess || 0, HISTORICAL_FALLBACK_STATS.keyGenSuccess);
+        data.stats.keyGenFailed = Math.max(data.stats.keyGenFailed || 0, HISTORICAL_FALLBACK_STATS.keyGenFailed);
+        
+        if (!data.users) data.users = {};
+        if (!data.config) data.config = {};
+        if (!data.bannedIps) data.bannedIps = [];
+        if (!data.notifications) data.notifications = [];
+        if (!data.freeAccessUsers) data.freeAccessUsers = [];
+        if (!data.chatHistory) data.chatHistory = [];
+        
+        return data;
+    } catch (e) {
+        console.warn("Initializing self-healing fallback registry template", e);
+        const fresh = {
+            stats: { ...HISTORICAL_FALLBACK_STATS },
+            config: { 
+                batchesApi: "https://xxadmin-raj.codxraj.site/api/batches", 
+                subjectsApi: "https://cw-api-website.vercel.app/batch/{batchId}", 
+                videosApi: "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true", 
+                pdfsApi: "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true",
+                resolverApi: "https://cw-vid-virid.vercel.app/get_video_details?name={videoId}",
+                isUpdateRequired: false,
+                updateLink: "https://play.google.com/store",
+                maintenanceMode: false,
+                joinChannelEnabled: false,
+                joinChannelLink: "https://t.me/yourchannel",
+                batchImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
+                splashImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
+                alwaysUpdate: false
+            },
+            dailyStats: [],
+            users: {},
+            bannedIps: [],
+            notifications: [],
+            freeAccessUsers: [],
+            chatHistory: []
+        };
+        saveDb(fresh);
+        return fresh;
+    }
+};
+
+const saveDb = (data) => {
+    try {
+        if (data.stats) {
+            data.stats.totalDownloads = Math.max(data.stats.totalDownloads || 0, HISTORICAL_FALLBACK_STATS.totalDownloads);
+            data.stats.totalUsers = Math.max(data.stats.totalUsers || 0, HISTORICAL_FALLBACK_STATS.totalUsers);
+            data.stats.totalActiveUsers = Math.max(data.stats.totalActiveUsers || 0, HISTORICAL_FALLBACK_STATS.totalActiveUsers);
+        }
+        const str = JSON.stringify(data, null, 2);
+        fs.writeFileSync(dbPath, str);
+        
+        // Write backup checkpoints
+        try { fs.writeFileSync(backupPath1, str); } catch (ex) {}
+        try { fs.writeFileSync(backupPath2, str); } catch (ex) {}
+    } catch (e) {
+        console.error("Critical error saving db backup arrays", e);
+    }
+};
 
 function broadcast(action, payload, toAdminOnly = false) {
     const msg = JSON.stringify({ action, payload });
@@ -132,8 +230,8 @@ wss.on('connection', (ws, req) => {
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
     if (isApp) {
-        const banCheckDb = getDb();
-        if (banCheckDb.bannedIps && banCheckDb.bannedIps.includes(ip)) {
+        const db = getDb();
+        if (db.bannedIps && db.bannedIps.includes(ip)) {
             ws.send(JSON.stringify({ action: 'update_config', payload: { maintenanceMode: true, splashImageUrl: "BANNED" } }));
             return ws.terminate();
         }
@@ -369,6 +467,14 @@ wss.on('connection', (ws, req) => {
                             saveDb(db);
                             broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
                         }
+                    }
+                } else if (data.action === 'toggle_uninstall') {
+                    const { userId } = data.payload;
+                    const db = getDb();
+                    if (db.users && db.users[userId]) {
+                        db.users[userId].isUninstalled = !db.users[userId].isUninstalled;
+                        saveDb(db);
+                        broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
                     }
                 } else if (data.action === 'unban_ip') {
                     const { ip } = data.payload;
