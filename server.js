@@ -13,11 +13,12 @@ app.use(express.static(path.join(__dirname, 'public')));
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const dbPath = process.env.VERCEL ? path.join('/tmp', 'db.json') : path.join(__dirname, 'db.json');
-const backupPath1 = path.join(__dirname, 'db_backup.json');
-const backupPath2 = path.join('/tmp', 'db_backup.json');
+// FIX 1: Both backup paths now use /tmp so Render (read-only __dirname) won't crash on writes
+const dbPath = path.join('/tmp', 'db.json');
+const backupPath1 = path.join('/tmp', 'db_backup.json');
+const backupPath2 = path.join('/tmp', 'db_backup2.json');
 
-// Memory template containing standard preset starting stats in case Vercel restarts the container!
+// Memory template containing standard preset starting stats in case server restarts the container!
 // Total downloads = 580, total users = 542, representing the active user base they already had!
 const HISTORICAL_FALLBACK_STATS = {
     totalUsers: 542,
@@ -48,7 +49,8 @@ if (!fs.existsSync(dbPath) && !fs.existsSync(backupPath1) && !fs.existsSync(back
             joinChannelLink: "https://t.me/yourchannel",
             batchImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
             splashImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
-            alwaysUpdate: false
+            alwaysUpdate: false,
+            chatEnabled: true
         },
         dailyStats: [], // format: { date: '21 May', activeUsers: 1 }
         users: {}, 
@@ -60,7 +62,8 @@ if (!fs.existsSync(dbPath) && !fs.existsSync(backupPath1) && !fs.existsSync(back
 } else {
     // Migrate to support new fields
     try {
-        const currentData = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+        const existingPath = fs.existsSync(dbPath) ? dbPath : fs.existsSync(backupPath1) ? backupPath1 : backupPath2;
+        const currentData = JSON.parse(fs.readFileSync(existingPath, 'utf8'));
         let modified = false;
         if (!currentData.bannedIps) { currentData.bannedIps = []; modified = true; }
         if (!currentData.notifications) { currentData.notifications = []; modified = true; }
@@ -176,7 +179,8 @@ const getDb = () => {
                 joinChannelLink: "https://t.me/yourchannel",
                 batchImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
                 splashImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
-                alwaysUpdate: false
+                alwaysUpdate: false,
+                chatEnabled: true
             },
             dailyStats: [],
             users: {},
@@ -230,8 +234,9 @@ wss.on('connection', (ws, req) => {
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
     if (isApp) {
-        const db = getDb();
-        if (db.bannedIps && db.bannedIps.includes(ip)) {
+        // FIX 2: Renamed first `const db` to `const checkDb` to avoid duplicate const in same block scope
+        const checkDb = getDb();
+        if (checkDb.bannedIps && checkDb.bannedIps.includes(ip)) {
             ws.send(JSON.stringify({ action: 'update_config', payload: { maintenanceMode: true, splashImageUrl: "BANNED" } }));
             return ws.terminate();
         }
