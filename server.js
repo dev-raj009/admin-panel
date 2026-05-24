@@ -266,7 +266,8 @@ wss.on('connection', (ws, req) => {
             payload: { 
                 ...db.config, 
                 freeAccessUsers: db.freeAccessUsers || [],
-                chatHistory: (db.chatHistory || []).slice(-50)
+                chatHistory: (db.chatHistory || []).slice(-50),
+                stats: db.stats
             } 
         }));
         
@@ -457,7 +458,7 @@ wss.on('connection', (ws, req) => {
                     db.config = data.payload;
                     saveDb(db);
                     // SEND CONFIG TO ALL APPS
-                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers || [] }, false);
+                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers || [], stats: db.stats }, false);
                 } else if (data.action === 'ban_user') {
                     const { userId } = data.payload;
                     const db = getDb();
@@ -492,14 +493,14 @@ wss.on('connection', (ws, req) => {
                     saveDb(db);
                     broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
                     // Broadcast updated free list to apps
-                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers }, false); 
+                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers, stats: db.stats }, false); 
                 } else if (data.action === 'revoke_free_access') {
                     const { userId } = data.payload;
                     const db = getDb();
                     db.freeAccessUsers = (db.freeAccessUsers || []).filter(id => id !== userId);
                     saveDb(db);
                     broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
-                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers }, false);
+                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers, stats: db.stats }, false);
                 }
             } catch(e) {
                 console.error("Parse Error Admin WS", e);
@@ -525,6 +526,20 @@ app.post('/api/stats/click', (req, res) => {
     saveDb(db);
     broadcast('update_stats', { stats: db.stats, dailyStats: db.dailyStats, connectedNow: connectedAppCounter }, true);
     res.json({ success: true });
+});
+
+// GET endpoint to return the latest active notification (polling fallback for mobiles)
+app.get('/api/latest_notification', (req, res) => {
+    try {
+        const db = getDb();
+        if (db.notifications && db.notifications.length > 0) {
+            res.json(db.notifications[db.notifications.length - 1]);
+        } else {
+            res.json(null);
+        }
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // Robust HTTP REST endpoint fallback for notification broadcast
