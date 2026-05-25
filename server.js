@@ -35,14 +35,15 @@ if (!fs.existsSync(dbPath)) {
             alwaysUpdate: false,
             securityPin: ""
         },
-        dailyStats: [],
-        users: {},
+        dailyStats: [], // format: { date: '21 May', activeUsers: 1 }
+        users: {}, // format: { userId: { name, avatar, firstActive, lastActive, totalActiveSeconds, isOnline, ip, activities: [] } }
         bannedIps: [],
         notifications: [],
-        freeAccessUsers: [],
-        chatHistory: []
+        freeAccessUsers: [], // format: [userId1, userId2...]
+        chatHistory: [] // format: { id, senderId, senderName, text, imageUrl, timestamp, isAdmin }
     }));
 } else {
+    // Migrate to support new fields
     try {
         const currentData = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
         let modified = false;
@@ -136,15 +137,13 @@ wss.on('connection', (ws, req) => {
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
     if (isApp) {
-        // ✅ FIX: Single db declaration for the ban check block
-        const banCheckDb = getDb();
-        if (banCheckDb.bannedIps && banCheckDb.bannedIps.includes(ip)) {
+        const db = getDb();
+        if (db.bannedIps && db.bannedIps.includes(ip)) {
             ws.send(JSON.stringify({ action: 'update_config', payload: { maintenanceMode: true, splashImageUrl: "BANNED" } }));
             return ws.terminate();
         }
 
         connectedAppCounter++;
-        // ✅ FIX: Fresh db read after ban check, no duplicate declaration
         const db = getDb();
         db.stats.totalActiveUsers++;
         db.stats.todayActiveUsers++;
@@ -152,10 +151,10 @@ wss.on('connection', (ws, req) => {
         // Push daily stat
         const today = getTodayStr();
         let todayStat = db.dailyStats.find(s => s.date === today);
-        if (!todayStat) {
+        if(!todayStat) {
             todayStat = { date: today, activeUsers: 0 };
             db.dailyStats.push(todayStat);
-            if (db.dailyStats.length > 7) db.dailyStats.shift();
+            if(db.dailyStats.length > 7) db.dailyStats.shift();
         }
         todayStat.activeUsers++;
 
@@ -204,6 +203,7 @@ wss.on('connection', (ws, req) => {
                     };
                     saveDb(db);
 
+                    // Notify admins of new user lists
                     broadcast('update_users', { users: db.users }, true);
                 } else if (data.action === 'track_activity' && data.payload) {
                     const { userId, activity } = data.payload;
@@ -233,8 +233,8 @@ wss.on('connection', (ws, req) => {
                     }
 
                     if (userId && db.users[userId]) {
-                        if (!db.users[userId].activities) db.users[userId].activities = [];
-                        db.users[userId].activities.push({ text: `Key Gen: ${success ? 'Success' : 'Failed'} (${type})`, time: Date.now() });
+                         if (!db.users[userId].activities) db.users[userId].activities = [];
+                         db.users[userId].activities.push({ text: `Key Gen: ${success ? 'Success' : 'Failed'} (${type})`, time: Date.now() });
                     }
                     saveDb(db);
                     broadcast('update_stats', { stats: db.stats, dailyStats: db.dailyStats, connectedNow: connectedAppCounter }, true);
@@ -245,8 +245,11 @@ wss.on('connection', (ws, req) => {
                     db.stats.notificationClicks = (db.stats.notificationClicks || 0) + 1;
                     if (notificationId && db.notifications) {
                         const notif = db.notifications.find(n => n.id == notificationId);
-                        if (notif && !notif.clickedBy.includes(userId)) {
-                            notif.clickedBy.push(userId);
+                        if (notif) {
+                            if (!notif.clickedBy) notif.clickedBy = [];
+                            if (!notif.clickedBy.includes(userId)) {
+                                notif.clickedBy.push(userId);
+                            }
                         }
                     }
                     if (userId && db.users[userId]) {
@@ -256,6 +259,21 @@ wss.on('connection', (ws, req) => {
                     saveDb(db);
                     broadcast('update_stats', { stats: db.stats, dailyStats: db.dailyStats, connectedNow: connectedAppCounter }, true);
                     broadcast('update_users', { users: db.users }, true);
+                    broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
+                } else if (data.action === 'track_delivered' && data.payload) {
+                    const { userId, notificationId } = data.payload;
+                    const db = getDb();
+                    if (notificationId && db.notifications) {
+                        const notif = db.notifications.find(n => n.id == notificationId);
+                        if (notif) {
+                            if (!notif.deliveredTo) notif.deliveredTo = [];
+                            if (!notif.deliveredTo.includes(userId)) {
+                                notif.deliveredTo.push(userId);
+                            }
+                        }
+                    }
+                    saveDb(db);
+                    broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
                 } else if (data.action === 'heartbeat' && data.payload) {
                     const { userId } = data.payload;
                     if (userId) {
@@ -263,12 +281,13 @@ wss.on('connection', (ws, req) => {
                         if (db.users && db.users[userId]) {
                             db.users[userId].lastActive = Date.now();
                             db.users[userId].isOnline = true;
+                            // Add periodic session increments if they stay active
                             if (ws.connectedAt) {
                                 const currentNow = Date.now();
                                 const diff = Math.round((currentNow - ws.connectedAt) / 1000);
                                 if (diff > 0) {
                                     db.users[userId].totalActiveSeconds = (db.users[userId].totalActiveSeconds || 0) + diff;
-                                    ws.connectedAt = currentNow;
+                                    ws.connectedAt = currentNow; // Reset segment
                                 }
                             }
                             saveDb(db);
@@ -277,6 +296,7 @@ wss.on('connection', (ws, req) => {
                     }
                 } else if (data.action === 'send_chat_message' && data.payload) {
                     const db = getDb();
+                    // Block if chat is globally off unless admin
                     if (!db.config.chatEnabled && !ws.isAdmin) return;
 
                     const msg = {
@@ -294,6 +314,7 @@ wss.on('connection', (ws, req) => {
                     if (db.chatHistory.length > 200) db.chatHistory.shift();
                     saveDb(db);
                     
+                    // Broadcast to everyone
                     broadcast('new_chat_message', msg, false);
                 }
             } catch (e) {
@@ -315,6 +336,7 @@ wss.on('connection', (ws, req) => {
                     }
                 }
                 saveDb(db);
+                // Broadcast updated user registry
                 broadcast('update_users', { users: db.users }, true);
             }
             
@@ -345,6 +367,7 @@ wss.on('connection', (ws, req) => {
                         body: data.payload.body,
                         link: data.payload.link,
                         sentToCount: connectedAppCounter,
+                        deliveredTo: [],
                         clickedBy: [],
                         timestamp: Date.now()
                     };
@@ -352,12 +375,14 @@ wss.on('connection', (ws, req) => {
                     if (db.notifications.length > 20) db.notifications.shift();
                     saveDb(db);
                     
+                    // BROADCAST NOTIFICATION TO ALL CONNECTED APPS
                     broadcast('notification', { ...data.payload, id: notifId }, false);
                     broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
                 } else if (data.action === 'update_config') {
                     const db = getDb();
                     db.config = data.payload;
                     saveDb(db);
+                    // SEND CONFIG TO ALL APPS
                     broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers || [] }, false);
                 } else if (data.action === 'ban_user') {
                     const { userId } = data.payload;
@@ -384,6 +409,7 @@ wss.on('connection', (ws, req) => {
                     });
                     saveDb(db);
                     broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
+                    // Broadcast updated free list to apps
                     broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers }, false); 
                 } else if (data.action === 'revoke_free_access') {
                     const { userId } = data.payload;
