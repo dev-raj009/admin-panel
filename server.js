@@ -144,7 +144,6 @@ wss.on('connection', (ws, req) => {
         }
 
         connectedAppCounter++;
-        const db = getDb();
         db.stats.totalActiveUsers++;
         db.stats.todayActiveUsers++;
         
