@@ -13,29 +13,12 @@ app.use(express.static(path.join(__dirname, 'public')));
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// FIX 1: Both backup paths now use /tmp so Render (read-only __dirname) won't crash on writes
-const dbPath = path.join('/tmp', 'db.json');
-const backupPath1 = path.join('/tmp', 'db_backup.json');
-const backupPath2 = path.join('/tmp', 'db_backup2.json');
-
-// Memory template containing standard preset starting stats in case server restarts the container!
-// Total downloads = 580, total users = 542, representing the active user base they already had!
-const HISTORICAL_FALLBACK_STATS = {
-    totalUsers: 542,
-    totalDownloads: 580,
-    totalActiveUsers: 542,
-    todayActiveUsers: 24,
-    notificationClicks: 42,
-    keysGeneratedToday: 82,
-    keyGenSuccess: 76,
-    keyGenFailed: 6,
-    totalViewType: 0
-};
+const dbPath = process.env.VERCEL ? path.join('/tmp', 'db.json') : path.join(__dirname, 'db.json');
 
 // Real DB starting from ZERO
-if (!fs.existsSync(dbPath) && !fs.existsSync(backupPath1) && !fs.existsSync(backupPath2)) {
+if (!fs.existsSync(dbPath)) {
     fs.writeFileSync(dbPath, JSON.stringify({
-        stats: { ...HISTORICAL_FALLBACK_STATS },
+        stats: { totalUsers: 0, totalDownloads: 0, totalActiveUsers: 0, todayActiveUsers: 0, notificationClicks: 0, keysGeneratedToday: 0, keyGenSuccess: 0, keyGenFailed: 0, totalViewType: 0 },
         config: { 
             batchesApi: "https://xxadmin-raj.codxraj.site/api/batches", 
             subjectsApi: "https://cw-api-website.vercel.app/batch/{batchId}", 
@@ -50,20 +33,19 @@ if (!fs.existsSync(dbPath) && !fs.existsSync(backupPath1) && !fs.existsSync(back
             batchImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
             splashImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
             alwaysUpdate: false,
-            chatEnabled: true
+            securityPin: ""
         },
         dailyStats: [], // format: { date: '21 May', activeUsers: 1 }
-        users: {}, 
+        users: {}, // format: { userId: { name, avatar, firstActive, lastActive, totalActiveSeconds, isOnline, ip, activities: [] } }
         bannedIps: [],
         notifications: [],
-        freeAccessUsers: [], 
-        chatHistory: [] 
+        freeAccessUsers: [], // format: [userId1, userId2...]
+        chatHistory: [] // format: { id, senderId, senderName, text, imageUrl, timestamp, isAdmin }
     }));
 } else {
     // Migrate to support new fields
     try {
-        const existingPath = fs.existsSync(dbPath) ? dbPath : fs.existsSync(backupPath1) ? backupPath1 : backupPath2;
-        const currentData = JSON.parse(fs.readFileSync(existingPath, 'utf8'));
+        const currentData = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
         let modified = false;
         if (!currentData.bannedIps) { currentData.bannedIps = []; modified = true; }
         if (!currentData.notifications) { currentData.notifications = []; modified = true; }
@@ -113,6 +95,10 @@ if (!fs.existsSync(dbPath) && !fs.existsSync(backupPath1) && !fs.existsSync(back
                 currentData.config.splashImageUrl = "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png";
                 modified = true;
             }
+            if (currentData.config.securityPin === undefined) {
+                currentData.config.securityPin = "";
+                modified = true;
+            }
         }
         if (!currentData.users) {
             currentData.users = {};
@@ -126,91 +112,8 @@ if (!fs.existsSync(dbPath) && !fs.existsSync(backupPath1) && !fs.existsSync(back
     }
 }
 
-// Self-healing load with deep backup scanning and index recovery
-const getDb = () => {
-    try {
-        let rawData = null;
-        if (fs.existsSync(dbPath)) {
-            rawData = fs.readFileSync(dbPath, 'utf8');
-        } else if (fs.existsSync(backupPath1)) {
-            rawData = fs.readFileSync(backupPath1, 'utf8');
-            console.log("Self-healing: recovered DB from backupPath1");
-        } else if (fs.existsSync(backupPath2)) {
-            rawData = fs.readFileSync(backupPath2, 'utf8');
-            console.log("Self-healing: recovered DB from backupPath2");
-        }
-
-        if (!rawData) {
-            throw new Error("No database files exist anywhere");
-        }
-
-        const data = JSON.parse(rawData);
-        
-        // Ensure stats fields exist and hold at least fallback counts to counteract server wipe outs
-        if (!data.stats) data.stats = { ...HISTORICAL_FALLBACK_STATS };
-        data.stats.totalDownloads = Math.max(data.stats.totalDownloads || 0, HISTORICAL_FALLBACK_STATS.totalDownloads);
-        data.stats.totalUsers = Math.max(data.stats.totalUsers || 0, HISTORICAL_FALLBACK_STATS.totalUsers);
-        data.stats.totalActiveUsers = Math.max(data.stats.totalActiveUsers || 0, HISTORICAL_FALLBACK_STATS.totalActiveUsers);
-        data.stats.keyGenSuccess = Math.max(data.stats.keyGenSuccess || 0, HISTORICAL_FALLBACK_STATS.keyGenSuccess);
-        data.stats.keyGenFailed = Math.max(data.stats.keyGenFailed || 0, HISTORICAL_FALLBACK_STATS.keyGenFailed);
-        
-        if (!data.users) data.users = {};
-        if (!data.config) data.config = {};
-        if (!data.bannedIps) data.bannedIps = [];
-        if (!data.notifications) data.notifications = [];
-        if (!data.freeAccessUsers) data.freeAccessUsers = [];
-        if (!data.chatHistory) data.chatHistory = [];
-        
-        return data;
-    } catch (e) {
-        console.warn("Initializing self-healing fallback registry template", e);
-        const fresh = {
-            stats: { ...HISTORICAL_FALLBACK_STATS },
-            config: { 
-                batchesApi: "https://xxadmin-raj.codxraj.site/api/batches", 
-                subjectsApi: "https://cw-api-website.vercel.app/batch/{batchId}", 
-                videosApi: "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true", 
-                pdfsApi: "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true",
-                resolverApi: "https://cw-vid-virid.vercel.app/get_video_details?name={videoId}",
-                isUpdateRequired: false,
-                updateLink: "https://play.google.com/store",
-                maintenanceMode: false,
-                joinChannelEnabled: false,
-                joinChannelLink: "https://t.me/yourchannel",
-                batchImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
-                splashImageUrl: "https://i.postimg.cc/s2MMkMr4/file-00000000cf8872089fe9cb392228cd4d.png",
-                alwaysUpdate: false,
-                chatEnabled: true
-            },
-            dailyStats: [],
-            users: {},
-            bannedIps: [],
-            notifications: [],
-            freeAccessUsers: [],
-            chatHistory: []
-        };
-        saveDb(fresh);
-        return fresh;
-    }
-};
-
-const saveDb = (data) => {
-    try {
-        if (data.stats) {
-            data.stats.totalDownloads = Math.max(data.stats.totalDownloads || 0, HISTORICAL_FALLBACK_STATS.totalDownloads);
-            data.stats.totalUsers = Math.max(data.stats.totalUsers || 0, HISTORICAL_FALLBACK_STATS.totalUsers);
-            data.stats.totalActiveUsers = Math.max(data.stats.totalActiveUsers || 0, HISTORICAL_FALLBACK_STATS.totalActiveUsers);
-        }
-        const str = JSON.stringify(data, null, 2);
-        fs.writeFileSync(dbPath, str);
-        
-        // Write backup checkpoints
-        try { fs.writeFileSync(backupPath1, str); } catch (ex) {}
-        try { fs.writeFileSync(backupPath2, str); } catch (ex) {}
-    } catch (e) {
-        console.error("Critical error saving db backup arrays", e);
-    }
-};
+const getDb = () => JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+const saveDb = (data) => fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
 
 function broadcast(action, payload, toAdminOnly = false) {
     const msg = JSON.stringify({ action, payload });
@@ -234,9 +137,8 @@ wss.on('connection', (ws, req) => {
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
     if (isApp) {
-        // FIX 2: Renamed first `const db` to `const checkDb` to avoid duplicate const in same block scope
-        const checkDb = getDb();
-        if (checkDb.bannedIps && checkDb.bannedIps.includes(ip)) {
+        const db = getDb();
+        if (db.bannedIps && db.bannedIps.includes(ip)) {
             ws.send(JSON.stringify({ action: 'update_config', payload: { maintenanceMode: true, splashImageUrl: "BANNED" } }));
             return ws.terminate();
         }
@@ -271,8 +173,7 @@ wss.on('connection', (ws, req) => {
             payload: { 
                 ...db.config, 
                 freeAccessUsers: db.freeAccessUsers || [],
-                chatHistory: (db.chatHistory || []).slice(-50),
-                stats: db.stats
+                chatHistory: (db.chatHistory || []).slice(-50)
             } 
         }));
         
@@ -463,7 +364,7 @@ wss.on('connection', (ws, req) => {
                     db.config = data.payload;
                     saveDb(db);
                     // SEND CONFIG TO ALL APPS
-                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers || [], stats: db.stats }, false);
+                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers || [] }, false);
                 } else if (data.action === 'ban_user') {
                     const { userId } = data.payload;
                     const db = getDb();
@@ -473,14 +374,6 @@ wss.on('connection', (ws, req) => {
                             saveDb(db);
                             broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
                         }
-                    }
-                } else if (data.action === 'toggle_uninstall') {
-                    const { userId } = data.payload;
-                    const db = getDb();
-                    if (db.users && db.users[userId]) {
-                        db.users[userId].isUninstalled = !db.users[userId].isUninstalled;
-                        saveDb(db);
-                        broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
                     }
                 } else if (data.action === 'unban_ip') {
                     const { ip } = data.payload;
@@ -498,14 +391,14 @@ wss.on('connection', (ws, req) => {
                     saveDb(db);
                     broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
                     // Broadcast updated free list to apps
-                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers, stats: db.stats }, false); 
+                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers }, false); 
                 } else if (data.action === 'revoke_free_access') {
                     const { userId } = data.payload;
                     const db = getDb();
                     db.freeAccessUsers = (db.freeAccessUsers || []).filter(id => id !== userId);
                     saveDb(db);
                     broadcast('init_admin', { ...db, connectedNow: connectedAppCounter }, true);
-                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers, stats: db.stats }, false);
+                    broadcast('update_config', { ...db.config, freeAccessUsers: db.freeAccessUsers }, false);
                 }
             } catch(e) {
                 console.error("Parse Error Admin WS", e);
@@ -531,20 +424,6 @@ app.post('/api/stats/click', (req, res) => {
     saveDb(db);
     broadcast('update_stats', { stats: db.stats, dailyStats: db.dailyStats, connectedNow: connectedAppCounter }, true);
     res.json({ success: true });
-});
-
-// GET endpoint to return the latest active notification (polling fallback for mobiles)
-app.get('/api/latest_notification', (req, res) => {
-    try {
-        const db = getDb();
-        if (db.notifications && db.notifications.length > 0) {
-            res.json(db.notifications[db.notifications.length - 1]);
-        } else {
-            res.json(null);
-        }
-    } catch(e) {
-        res.status(500).json({ error: e.message });
-    }
 });
 
 // Robust HTTP REST endpoint fallback for notification broadcast
