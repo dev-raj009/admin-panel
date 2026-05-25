@@ -20,7 +20,7 @@ if (!fs.existsSync(dbPath)) {
     fs.writeFileSync(dbPath, JSON.stringify({
         stats: { totalUsers: 0, totalDownloads: 0, totalActiveUsers: 0, todayActiveUsers: 0, notificationClicks: 0, keysGeneratedToday: 0, keyGenSuccess: 0, keyGenFailed: 0, totalViewType: 0 },
         config: { 
-            batchesApi: "https://xxadmin-raj.codxraj.site/api/batches", 
+            batchesApi: "https://cw-ut-apis-e37c22944d2f.herokuapp.com/api/batches", 
             subjectsApi: "https://cw-api-website.vercel.app/batch/{batchId}", 
             videosApi: "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true", 
             pdfsApi: "https://cw-api-website.vercel.app/batch?batchid={batchId}&topicid={topicId}&full=true",
